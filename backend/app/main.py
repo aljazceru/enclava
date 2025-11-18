@@ -223,9 +223,17 @@ app.add_middleware(
 # Add analytics middleware
 setup_analytics_middleware(app)
 
-# Security middleware disabled - handled externally
+# Add rate limiting middleware
+from app.middleware.rate_limiting import setup_rate_limiting_middleware
+setup_rate_limiting_middleware(app)
 
-# Rate limiting middleware disabled - handled externally
+# Add security middleware (request ID, security headers, IP filtering, error sanitization)
+from app.middleware.security import setup_security_middleware
+setup_security_middleware(app, enabled=settings.API_SECURITY_ENABLED)
+
+# Add request validation middleware (size limits, content-type validation, input sanitization)
+from app.middleware.request_validation import setup_request_validation_middleware
+setup_request_validation_middleware(app, enabled=settings.API_REQUEST_VALIDATION_ENABLED)
 
 
 # Exception handlers

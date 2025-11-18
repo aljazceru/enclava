@@ -2,6 +2,22 @@
 
 /**
  * Plugin Context - Manages plugin state and UI integration
+ *
+ * Authorization System:
+ * - All plugin actions require appropriate permissions
+ * - Admin and super_admin roles have full access to all plugin operations
+ * - Regular users need specific permissions:
+ *   - plugins:install - Install new plugins
+ *   - plugins:uninstall - Remove installed plugins
+ *   - plugins:enable - Enable installed plugins
+ *   - plugins:disable - Disable running plugins
+ *   - plugins:configure - Modify plugin configurations
+ *   - plugins:load - Load plugin components
+ *   - plugins:unload - Unload plugin components
+ *   - plugins:view - View plugin pages and content
+ * - Wildcard permissions are supported (e.g., "plugins:*" grants all plugin permissions)
+ * - UI components can use authorization helpers (canInstallPlugins, canEnablePlugins, etc.)
+ *   to show/hide elements based on user permissions
  */
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { useAuth } from '@/components/providers/auth-provider';
@@ -60,7 +76,7 @@ interface PluginContextType {
   pluginConfigurations: Record<string, PluginConfiguration>;
   loading: boolean;
   error: string | null;
-  
+
   // Actions
   refreshInstalledPlugins: () => Promise<void>;
   searchAvailablePlugins: (query?: string, tags?: string[], category?: string) => Promise<void>;
@@ -70,16 +86,24 @@ interface PluginContextType {
   disablePlugin: (pluginId: string) => Promise<boolean>;
   loadPlugin: (pluginId: string) => Promise<boolean>;
   unloadPlugin: (pluginId: string) => Promise<boolean>;
-  
+
   // Configuration
   getPluginConfiguration: (pluginId: string) => Promise<PluginConfiguration | null>;
   savePluginConfiguration: (pluginId: string, config: Record<string, any>) => Promise<boolean>;
   getPluginSchema: (pluginId: string) => Promise<any>;
-  
+
   // UI Integration
   getPluginPages: (pluginId: string) => PluginPage[];
   isPluginPageAuthorized: (pluginId: string, pagePath: string) => boolean;
   getPluginComponent: (pluginId: string, componentName: string) => React.ComponentType | null;
+
+  // Authorization
+  canInstallPlugins: () => boolean;
+  canUninstallPlugins: () => boolean;
+  canEnablePlugins: () => boolean;
+  canDisablePlugins: () => boolean;
+  canConfigurePlugins: () => boolean;
+  canManagePlugins: () => boolean;
 }
 
 const PluginContext = createContext<PluginContextType | undefined>(undefined);
@@ -109,6 +133,12 @@ export const usePlugin = () => {
         getPluginPages: () => [],
         isPluginPageAuthorized: () => false,
         getPluginComponent: () => null,
+        canInstallPlugins: () => false,
+        canUninstallPlugins: () => false,
+        canEnablePlugins: () => false,
+        canDisablePlugins: () => false,
+        canConfigurePlugins: () => false,
+        canManagePlugins: () => false,
       };
     }
     throw new Error('usePlugin must be used within a PluginProvider');
@@ -151,7 +181,60 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
     
     throw new Error(`Unsupported method: ${method}`);
   };
-  
+
+  /**
+   * Permission checking utilities
+   */
+  const hasPermission = useCallback((requiredPermission: string): boolean => {
+    if (!user) return false;
+
+    // Super admin and admin roles have all permissions
+    if (user.role === 'super_admin' || user.role === 'admin') {
+      return true;
+    }
+
+    // Check if user has the exact permission
+    if (user.permissions.includes(requiredPermission)) {
+      return true;
+    }
+
+    // Check for wildcard permissions
+    const permissionParts = requiredPermission.split(':');
+
+    // Check for namespace wildcard (e.g., "plugins:*" grants all plugin permissions)
+    if (permissionParts.length >= 2) {
+      const namespaceWildcard = `${permissionParts[0]}:*`;
+      if (user.permissions.includes(namespaceWildcard)) {
+        return true;
+      }
+    }
+
+    // Check for resource wildcard (e.g., "plugins:install:*")
+    if (permissionParts.length >= 3) {
+      const resourceWildcard = `${permissionParts[0]}:${permissionParts[1]}:*`;
+      if (user.permissions.includes(resourceWildcard)) {
+        return true;
+      }
+    }
+
+    return false;
+  }, [user]);
+
+  const checkPluginPermission = useCallback((action: 'install' | 'uninstall' | 'enable' | 'disable' | 'configure' | 'load' | 'unload' | 'view'): boolean => {
+    if (!isAuthenticated || !user) {
+      return false;
+    }
+
+    // Admin roles have full access
+    if (user.role === 'super_admin' || user.role === 'admin') {
+      return true;
+    }
+
+    // Check specific permission
+    const permission = `plugins:${action}`;
+    return hasPermission(permission);
+  }, [user, isAuthenticated, hasPermission]);
+
   const refreshInstalledPlugins = useCallback(async () => {
     if (!user || !isAuthenticated) {
       setError('Authentication required');
@@ -212,10 +295,16 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   }, [user, isAuthenticated]);
   
   const installPlugin = useCallback(async (pluginId: string, version: string): Promise<boolean> => {
+    // Check permission before attempting installation
+    if (!checkPluginPermission('install')) {
+      setError('You do not have permission to install plugins. Required permission: plugins:install');
+      return false;
+    }
+
     try {
       setLoading(true);
       setError(null);
-      
+
       await apiRequest('/install', {
         method: 'POST',
         body: JSON.stringify({
@@ -224,11 +313,11 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
           source: 'repository'
         }),
       });
-      
+
       // Refresh plugins after installation
       await refreshInstalledPlugins();
       await searchAvailablePlugins(); // Refresh to update local status
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Installation failed');
@@ -236,31 +325,37 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  }, [refreshInstalledPlugins, searchAvailablePlugins]);
+  }, [refreshInstalledPlugins, searchAvailablePlugins, checkPluginPermission]);
   
   const uninstallPlugin = async (pluginId: string, keepData = true): Promise<boolean> => {
+    // Check permission before attempting uninstallation
+    if (!checkPluginPermission('uninstall')) {
+      setError('You do not have permission to uninstall plugins. Required permission: plugins:uninstall');
+      return false;
+    }
+
     try {
       setLoading(true);
       setError(null);
-      
+
       await apiRequest(`/${pluginId}`, {
         method: 'DELETE',
         body: JSON.stringify({ keep_data: keepData }),
       });
-      
+
       // Remove from state
       setInstalledPlugins(prev => prev.filter(p => p.id !== pluginId));
       setPluginConfigurations(prev => {
         const { [pluginId]: removed, ...rest } = prev;
         return rest;
       });
-      
+
       // Unregister components
       setPluginComponents(prev => {
         const { [pluginId]: removed, ...rest } = prev;
         return rest;
       });
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Uninstallation failed');
@@ -271,14 +366,20 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   };
   
   const enablePlugin = async (pluginId: string): Promise<boolean> => {
+    // Check permission before attempting to enable
+    if (!checkPluginPermission('enable')) {
+      setError('You do not have permission to enable plugins. Required permission: plugins:enable');
+      return false;
+    }
+
     try {
       await apiRequest(`/${pluginId}/enable`, { method: 'POST' });
-      
+
       // Update plugin status
-      setInstalledPlugins(prev => 
+      setInstalledPlugins(prev =>
         prev.map(p => p.id === pluginId ? { ...p, status: 'enabled' } : p)
       );
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Enable failed');
@@ -287,14 +388,20 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   };
   
   const disablePlugin = async (pluginId: string): Promise<boolean> => {
+    // Check permission before attempting to disable
+    if (!checkPluginPermission('disable')) {
+      setError('You do not have permission to disable plugins. Required permission: plugins:disable');
+      return false;
+    }
+
     try {
       await apiRequest(`/${pluginId}/disable`, { method: 'POST' });
-      
+
       // Update plugin status
-      setInstalledPlugins(prev => 
+      setInstalledPlugins(prev =>
         prev.map(p => p.id === pluginId ? { ...p, status: 'disabled', loaded: false } : p)
       );
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Disable failed');
@@ -303,17 +410,23 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   };
   
   const loadPlugin = async (pluginId: string): Promise<boolean> => {
+    // Check permission before attempting to load
+    if (!checkPluginPermission('load')) {
+      setError('You do not have permission to load plugins. Required permission: plugins:load');
+      return false;
+    }
+
     try {
       await apiRequest(`/${pluginId}/load`, { method: 'POST' });
-      
+
       // Update plugin status
-      setInstalledPlugins(prev => 
+      setInstalledPlugins(prev =>
         prev.map(p => p.id === pluginId ? { ...p, loaded: true } : p)
       );
-      
+
       // Load plugin UI components
       await loadPluginComponents(pluginId);
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Load failed');
@@ -322,20 +435,26 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   };
   
   const unloadPlugin = async (pluginId: string): Promise<boolean> => {
+    // Check permission before attempting to unload
+    if (!checkPluginPermission('unload')) {
+      setError('You do not have permission to unload plugins. Required permission: plugins:unload');
+      return false;
+    }
+
     try {
       await apiRequest(`/${pluginId}/unload`, { method: 'POST' });
-      
+
       // Update plugin status
-      setInstalledPlugins(prev => 
+      setInstalledPlugins(prev =>
         prev.map(p => p.id === pluginId ? { ...p, loaded: false } : p)
       );
-      
+
       // Unregister components
       setPluginComponents(prev => {
         const { [pluginId]: removed, ...rest } = prev;
         return rest;
       });
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unload failed');
@@ -353,12 +472,18 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   };
   
   const savePluginConfiguration = async (pluginId: string, config: Record<string, any>): Promise<boolean> => {
+    // Check permission before attempting to save configuration
+    if (!checkPluginPermission('configure')) {
+      setError('You do not have permission to configure plugins. Required permission: plugins:configure');
+      return false;
+    }
+
     try {
       await apiRequest(`/${pluginId}/config`, {
         method: 'POST',
         body: JSON.stringify({ configuration: config }),
       });
-      
+
       // Update local state
       setPluginConfigurations(prev => ({
         ...prev,
@@ -368,7 +493,7 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
           last_updated: new Date().toISOString()
         }
       }));
-      
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save configuration');
@@ -494,15 +619,40 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
   const getPluginPages = (pluginId: string): PluginPage[] => {
     const plugin = installedPlugins.find(p => p.id === pluginId);
     if (!plugin || !plugin.manifest) return [];
-    
+
     const uiConfig = plugin.manifest.spec?.ui_config;
     return uiConfig?.pages || [];
   };
-  
+
   const isPluginPageAuthorized = (pluginId: string, pagePath: string): boolean => {
-    // TODO: Implement authorization logic based on user permissions
+    // Must be authenticated to access plugin pages
+    if (!isAuthenticated || !user) {
+      return false;
+    }
+
     const plugin = installedPlugins.find(p => p.id === pluginId);
-    return plugin?.status === 'enabled' && plugin?.loaded;
+    if (!plugin) {
+      return false;
+    }
+
+    // Plugin must be enabled and loaded
+    if (plugin.status !== 'enabled' || !plugin.loaded) {
+      return false;
+    }
+
+    // Find the specific page
+    const pages = getPluginPages(pluginId);
+    const page = pages.find(p => p.path === pagePath);
+
+    // If page requires auth (default true if not specified), check permissions
+    if (page?.requiresAuth !== false) {
+      // Check if user has permission to view plugin pages
+      if (!checkPluginPermission('view')) {
+        return false;
+      }
+    }
+
+    return true;
   };
   
   const getPluginComponent = (pluginId: string, componentName: string): React.ComponentType | null => {
@@ -521,7 +671,28 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
       setError(null);
     }
   }, [user, isAuthenticated, refreshInstalledPlugins]);
-  
+
+  // Authorization helper functions for UI components
+  const canInstallPlugins = useCallback(() => checkPluginPermission('install'), [checkPluginPermission]);
+  const canUninstallPlugins = useCallback(() => checkPluginPermission('uninstall'), [checkPluginPermission]);
+  const canEnablePlugins = useCallback(() => checkPluginPermission('enable'), [checkPluginPermission]);
+  const canDisablePlugins = useCallback(() => checkPluginPermission('disable'), [checkPluginPermission]);
+  const canConfigurePlugins = useCallback(() => checkPluginPermission('configure'), [checkPluginPermission]);
+  const canManagePlugins = useCallback(() => {
+    // User can manage plugins if they have any of the plugin management permissions
+    // or if they are an admin
+    if (!isAuthenticated || !user) return false;
+    if (user.role === 'super_admin' || user.role === 'admin') return true;
+
+    return checkPluginPermission('install') ||
+           checkPluginPermission('uninstall') ||
+           checkPluginPermission('enable') ||
+           checkPluginPermission('disable') ||
+           checkPluginPermission('configure') ||
+           hasPermission('plugins:manage') ||
+           hasPermission('plugins:*');
+  }, [user, isAuthenticated, checkPluginPermission, hasPermission]);
+
   const value: PluginContextType = {
     // State
     installedPlugins,
@@ -529,7 +700,7 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
     pluginConfigurations,
     loading,
     error,
-    
+
     // Actions
     refreshInstalledPlugins,
     searchAvailablePlugins,
@@ -539,16 +710,24 @@ export const PluginProvider: React.FC<PluginProviderProps> = ({ children }) => {
     disablePlugin,
     loadPlugin,
     unloadPlugin,
-    
+
     // Configuration
     getPluginConfiguration,
     savePluginConfiguration,
     getPluginSchema,
-    
+
     // UI Integration
     getPluginPages,
     isPluginPageAuthorized,
     getPluginComponent,
+
+    // Authorization
+    canInstallPlugins,
+    canUninstallPlugins,
+    canEnablePlugins,
+    canDisablePlugins,
+    canConfigurePlugins,
+    canManagePlugins,
   };
   
   return (

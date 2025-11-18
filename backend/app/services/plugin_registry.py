@@ -22,6 +22,7 @@ from cryptography.exceptions import InvalidSignature
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.cache import core_cache
 from app.models.plugin import Plugin, PluginConfiguration, PluginAuditLog
 from app.models.user import User
 from app.db.database import get_db
@@ -243,18 +244,18 @@ class PluginRepositoryClient:
             if not private_key_path.exists():
                 logger.error("No private key available for signing")
                 return None
-            
+
             # Load private key
             with open(private_key_path, 'rb') as f:
                 private_key = serialization.load_pem_private_key(
                     f.read(),
                     password=None
                 )
-            
+
             # Calculate file hash
             with open(plugin_path, 'rb') as f:
                 file_hash = hashlib.sha256(f.read()).digest()
-            
+
             # Sign the hash
             signature = private_key.sign(
                 file_hash,
@@ -264,12 +265,41 @@ class PluginRepositoryClient:
                 ),
                 hashes.SHA256()
             )
-            
+
             # Return base64-encoded signature
             return base64.b64encode(signature).decode()
-            
+
         except Exception as e:
             logger.error(f"Failed to sign plugin package: {e}")
+            return None
+
+    async def get_categories(self) -> Optional[List[Dict[str, Any]]]:
+        """Fetch plugin categories from repository"""
+        try:
+            logger.info(f"Fetching plugin categories from repository: {self.repository_url}")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.repository_url}/api/categories",
+                    timeout=self.timeout
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        categories = data.get("categories", [])
+                        logger.info(f"Successfully fetched {len(categories)} categories from repository")
+                        return categories
+                    else:
+                        logger.warning(f"Failed to fetch categories from repository: HTTP {response.status}")
+                        return None
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout while fetching categories from repository (timeout={self.timeout}s)")
+            return None
+        except aiohttp.ClientError as e:
+            logger.warning(f"Network error while fetching categories from repository: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error fetching categories from repository: {e}")
             return None
 
 
@@ -646,31 +676,58 @@ class PluginDiscoveryService:
             return []
     
     async def get_installed_plugins(self, user_id: str, db: AsyncSession) -> List[Dict[str, Any]]:
-        """Get list of installed plugins for user"""
+        """Get list of installed plugins for user with permission-based filtering"""
         try:
-            # Get all installed plugins (for now, show all plugins to all users)
-            # TODO: Implement proper user-based plugin visibility/permissions
             from sqlalchemy import select
-            
+            from app.models.user import User
+            from app.services.permission_manager import permission_registry
+
+            # Get user to check permissions
+            user_stmt = select(User).where(User.id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+
+            if not user:
+                logger.warning(f"User {user_id} not found when getting installed plugins")
+                return []
+
+            # Get user's effective permissions
+            user_roles = [user.role] if user.role else []
+            custom_perms = user.permissions if isinstance(user.permissions, list) else list(user.permissions.keys()) if isinstance(user.permissions, dict) else []
+            user_permissions = permission_registry.get_user_permissions(user_roles, custom_perms)
+
+            # Get all installed plugins
             stmt = select(Plugin).where(
                 Plugin.status.in_(["installed", "enabled", "disabled"])
             )
             result = await db.execute(stmt)
             installed_plugins = result.scalars().all()
-            
+
             # If no plugins installed, return empty list
             if not installed_plugins:
                 return []
-            
+
             plugin_list = []
             for plugin in installed_plugins:
                 try:
                     # Get runtime status safely
                     plugin_id = str(plugin.id)  # Ensure string conversion
+
+                    # Check if user has permission to view this plugin
+                    # Users can view plugins if they have general view permission or specific plugin permission
+                    has_view_permission = permission_registry.check_plugin_permission(
+                        user_permissions, plugin_id, "view"
+                    )
+
+                    # Skip plugins the user doesn't have permission to view
+                    if not has_view_permission:
+                        logger.debug(f"User {user_id} does not have permission to view plugin {plugin_id}")
+                        continue
+
                     loaded = plugin_id in plugin_loader.loaded_plugins
                     health_status = {}
                     resource_stats = {}
-                    
+
                     if loaded:
                         try:
                             plugin_instance = plugin_loader.loaded_plugins[plugin_id]
@@ -678,14 +735,14 @@ class PluginDiscoveryService:
                             resource_stats = plugin_loader.get_resource_stats(plugin_id)
                         except Exception as e:
                             logger.warning(f"Failed to get runtime info for plugin {plugin_id}: {e}")
-                    
+
                     # Get database stats safely
                     db_stats = {}
                     try:
                         db_stats = await plugin_db_manager.get_plugin_database_stats(plugin_id)
                     except Exception as e:
                         logger.warning(f"Failed to get database stats for plugin {plugin_id}: {e}")
-                    
+
                     plugin_list.append({
                         "id": plugin_id,
                         "name": plugin.name or "Unknown",
@@ -749,47 +806,90 @@ class PluginDiscoveryService:
             return []
     
     async def get_plugin_categories(self) -> List[Dict[str, Any]]:
-        """Get available plugin categories"""
+        """Get available plugin categories with caching and repository discovery"""
+        cache_key = "plugin_categories"
+        cache_prefix = "plugin"
+        cache_ttl = 3600  # 1 hour
+
         try:
-            # TODO: Implement category discovery from repository
-            default_categories = [
-                {
-                    "id": "integrations",
-                    "name": "Integrations", 
-                    "description": "Third-party service integrations"
-                },
-                {
-                    "id": "ai-tools",
-                    "name": "AI Tools",
-                    "description": "AI and machine learning tools"
-                },
-                {
-                    "id": "productivity", 
-                    "name": "Productivity",
-                    "description": "Productivity and workflow tools"
-                },
-                {
-                    "id": "analytics",
-                    "name": "Analytics",
-                    "description": "Data analytics and reporting"
-                },
-                {
-                    "id": "communication",
-                    "name": "Communication", 
-                    "description": "Communication and collaboration tools"
-                },
-                {
-                    "id": "security",
-                    "name": "Security",
-                    "description": "Security and compliance tools"
-                }
-            ]
-            
+            # Step 1: Check cache first
+            logger.debug("Checking cache for plugin categories")
+            cached_categories = await core_cache.get(cache_key, prefix=cache_prefix)
+
+            if cached_categories is not None:
+                logger.info(f"Returning {len(cached_categories)} categories from cache")
+                return cached_categories
+
+            logger.debug("No cached categories found, fetching from repository")
+
+            # Step 2: Try to fetch from repository
+            try:
+                repository_categories = await self.repo_client.get_categories()
+
+                if repository_categories:
+                    logger.info(f"Successfully fetched {len(repository_categories)} categories from repository")
+
+                    # Cache the repository categories
+                    await core_cache.set(cache_key, repository_categories, cache_ttl, prefix=cache_prefix)
+                    logger.debug(f"Cached repository categories with TTL={cache_ttl}s")
+
+                    return repository_categories
+                else:
+                    logger.warning("Repository returned no categories, falling back to defaults")
+
+            except Exception as repo_error:
+                logger.warning(f"Failed to fetch categories from repository: {repo_error}, falling back to defaults")
+
+            # Step 3: Fall back to default categories
+            logger.info("Using default plugin categories")
+            default_categories = self._get_default_categories()
+
+            # Cache the default categories (with shorter TTL to retry repository sooner)
+            shorter_ttl = 300  # 5 minutes for defaults
+            await core_cache.set(cache_key, default_categories, shorter_ttl, prefix=cache_prefix)
+            logger.debug(f"Cached default categories with TTL={shorter_ttl}s")
+
             return default_categories
-            
+
         except Exception as e:
             logger.error(f"Error getting plugin categories: {e}")
-            return []
+            # Return defaults without caching on unexpected errors
+            return self._get_default_categories()
+
+    def _get_default_categories(self) -> List[Dict[str, Any]]:
+        """Get default plugin categories as fallback"""
+        return [
+            {
+                "id": "integrations",
+                "name": "Integrations",
+                "description": "Third-party service integrations"
+            },
+            {
+                "id": "ai-tools",
+                "name": "AI Tools",
+                "description": "AI and machine learning tools"
+            },
+            {
+                "id": "productivity",
+                "name": "Productivity",
+                "description": "Productivity and workflow tools"
+            },
+            {
+                "id": "analytics",
+                "name": "Analytics",
+                "description": "Data analytics and reporting"
+            },
+            {
+                "id": "communication",
+                "name": "Communication",
+                "description": "Communication and collaboration tools"
+            },
+            {
+                "id": "security",
+                "name": "Security",
+                "description": "Security and compliance tools"
+            }
+        ]
 
 
 # Global instances

@@ -488,6 +488,91 @@ async def get_plugin_configuration_schema(
         raise HTTPException(status_code=500, detail=f"Failed to get schema: {str(e)}")
 
 
+@router.get("/notifications")
+async def get_plugin_notifications(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    unread_only: bool = False,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get plugin-related notifications for the current user"""
+    try:
+        from app.models.user import User
+        from sqlalchemy import select
+
+        # Get user with notification settings
+        user_stmt = select(User).where(User.id == current_user["id"])
+        user_result = await db.execute(user_stmt)
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Get plugin notifications
+        notifications = []
+        if user.notification_settings and "plugin_notifications" in user.notification_settings:
+            notifications = user.notification_settings["plugin_notifications"]
+
+            # Filter for unread only if requested
+            if unread_only:
+                notifications = [n for n in notifications if not n.get("read", False)]
+
+        return {
+            "notifications": notifications,
+            "count": len(notifications),
+            "unread_count": len([n for n in notifications if not n.get("read", False)])
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get plugin notifications: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get notifications: {e}")
+
+
+@router.post("/notifications/{notification_index}/mark-read")
+async def mark_notification_read(
+    notification_index: int,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Mark a plugin notification as read"""
+    try:
+        from app.models.user import User
+        from sqlalchemy import select
+
+        # Get user with notification settings
+        user_stmt = select(User).where(User.id == current_user["id"])
+        user_result = await db.execute(user_stmt)
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Mark notification as read
+        if user.notification_settings and "plugin_notifications" in user.notification_settings:
+            notifications = user.notification_settings["plugin_notifications"]
+
+            if 0 <= notification_index < len(notifications):
+                notifications[notification_index]["read"] = True
+                await db.commit()
+
+                return {
+                    "status": "success",
+                    "message": "Notification marked as read"
+                }
+            else:
+                raise HTTPException(status_code=404, detail="Notification not found")
+        else:
+            raise HTTPException(status_code=404, detail="No notifications found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to mark notification as read: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to mark notification as read: {e}")
+
+
 @router.post("/{plugin_id}/test-credentials")
 async def test_plugin_credentials(
     plugin_id: str,
@@ -606,7 +691,82 @@ async def install_plugin_background(plugin_id: str, version: str, user_id: str, 
             plugin_id, version, user_id, db
         )
         logger.info(f"Background installation completed: {result}")
-        
+
+        # Create success audit log
+        from app.models.plugin import PluginAuditLog
+        from datetime import datetime, timezone
+
+        audit_log = PluginAuditLog(
+            plugin_id=plugin_id,
+            user_id=user_id,
+            action="install",
+            event_type="installation_success",
+            resource=f"plugin/{plugin_id}",
+            success=True,
+            request_data={"version": version, "source": "repository"},
+            response_data=result,
+            timestamp=datetime.now(timezone.utc)
+        )
+        db.add(audit_log)
+        await db.commit()
+
     except Exception as e:
-        logger.error(f"Background installation failed: {e}")
-        # TODO: Notify user of installation failure
+        logger.error(f"Background installation failed for plugin {plugin_id}: {e}")
+
+        # Create failure audit log with error details
+        from app.models.plugin import PluginAuditLog
+        from app.models.user import User
+        from sqlalchemy import select
+        from datetime import datetime, timezone
+
+        try:
+            # Create detailed audit log for the failure
+            audit_log = PluginAuditLog(
+                plugin_id=plugin_id,
+                user_id=user_id,
+                action="install",
+                event_type="installation_failure",
+                resource=f"plugin/{plugin_id}",
+                success=False,
+                error_message=str(e),
+                request_data={"version": version, "source": "repository"},
+                timestamp=datetime.now(timezone.utc)
+            )
+            db.add(audit_log)
+
+            # Update user notification settings to notify about the failure
+            user_stmt = select(User).where(User.id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+
+            if user:
+                # Add notification to user's notification settings
+                if not user.notification_settings:
+                    user.notification_settings = {}
+
+                if "plugin_notifications" not in user.notification_settings:
+                    user.notification_settings["plugin_notifications"] = []
+
+                # Add installation failure notification
+                notification = {
+                    "type": "plugin_installation_failure",
+                    "plugin_id": plugin_id,
+                    "version": version,
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "read": False
+                }
+
+                user.notification_settings["plugin_notifications"].append(notification)
+
+                # Keep only last 50 notifications
+                if len(user.notification_settings["plugin_notifications"]) > 50:
+                    user.notification_settings["plugin_notifications"] = user.notification_settings["plugin_notifications"][-50:]
+
+                logger.info(f"Added installation failure notification for user {user_id}")
+
+            await db.commit()
+
+        except Exception as notification_error:
+            logger.error(f"Failed to create installation failure notification: {notification_error}")
+            await db.rollback()

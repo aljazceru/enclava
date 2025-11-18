@@ -96,15 +96,41 @@ class PluginAuthenticationService:
             
             if not plugin:
                 return None, None
-            
+
             # Verify plugin permissions for API key
-            # TODO: Check plugin-specific permissions in API key scopes
-            
+            # Check if API key has permission to access this specific plugin
+            has_plugin_access = False
+
+            # Check API key scopes for plugin-specific permissions
+            # Format: "plugins:plugin_id:use" or "platform:plugins:use"
+            if api_key_obj.scopes:
+                for scope in api_key_obj.scopes:
+                    # Check for specific plugin scope (e.g., "plugins:zammad:use")
+                    if scope == f"plugins:{plugin_id}:use":
+                        has_plugin_access = True
+                        break
+                    # Check for wildcard plugin scope (e.g., "plugins:*:use" or "plugins:*")
+                    elif scope == "plugins:*:use" or scope == "plugins:*":
+                        has_plugin_access = True
+                        break
+                    # Check for general plugin usage permission
+                    elif scope == "platform:plugins:use" or scope == "platform:plugins:*":
+                        has_plugin_access = True
+                        break
+
+            # If API key has no scopes defined, allow access (backward compatibility)
+            if not api_key_obj.scopes or len(api_key_obj.scopes) == 0:
+                has_plugin_access = True
+
+            if not has_plugin_access:
+                logger.warning(f"API key {api_key_obj.id} does not have permission to access plugin {plugin_id}")
+                return None, None
+
             return api_key_obj.user_id, {
                 "user": api_key_obj.user,
                 "plugin": plugin,
                 "api_key": api_key_obj,
-                "permissions": ["api_access"]
+                "permissions": ["api_access", "plugin_access"]
             }
             
         except Exception as e:

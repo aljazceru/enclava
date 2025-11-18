@@ -81,7 +81,13 @@ class Settings(BaseSettings):
     
       
     # Rate Limiting Configuration
-  
+    # Anonymous/unauthenticated users (IP-based, low limits)
+    API_RATE_LIMIT_ANONYMOUS_PER_MINUTE: int = int(os.getenv("API_RATE_LIMIT_ANONYMOUS_PER_MINUTE", "10"))
+    API_RATE_LIMIT_ANONYMOUS_PER_HOUR: int = int(os.getenv("API_RATE_LIMIT_ANONYMOUS_PER_HOUR", "100"))
+
+    # IP whitelist for rate limiting (comma-separated list of IPs to bypass rate limits)
+    API_RATE_LIMIT_WHITELIST_IPS: str = os.getenv("API_RATE_LIMIT_WHITELIST_IPS", "127.0.0.1,::1")
+
     # PrivateMode Standard tier limits (organization-level, not per user)
     # These are shared across all API keys and users in the organization
     PRIVATEMODE_REQUESTS_PER_MINUTE: int = int(os.getenv("PRIVATEMODE_REQUESTS_PER_MINUTE", "20"))
@@ -105,8 +111,16 @@ class Settings(BaseSettings):
     API_MAX_REQUEST_BODY_SIZE: int = int(os.getenv("API_MAX_REQUEST_BODY_SIZE", "10485760"))  # 10MB
     API_MAX_REQUEST_BODY_SIZE_PREMIUM: int = int(os.getenv("API_MAX_REQUEST_BODY_SIZE_PREMIUM", "52428800"))  # 50MB for premium
     
+    # Security Features
+    API_SECURITY_ENABLED: bool = os.getenv("API_SECURITY_ENABLED", "True").lower() == "true"
+    API_SECURITY_HEADERS_ENABLED: bool = os.getenv("API_SECURITY_HEADERS_ENABLED", "True").lower() == "true"
+    API_RATE_LIMITING_ENABLED: bool = os.getenv("API_RATE_LIMITING_ENABLED", "True").lower() == "true"
+    API_REQUEST_VALIDATION_ENABLED: bool = os.getenv("API_REQUEST_VALIDATION_ENABLED", "True").lower() == "true"
+
     # IP Security
-    
+    API_BLOCKED_IPS: str = os.getenv("API_BLOCKED_IPS", "")
+    API_ALLOWED_IPS: str = os.getenv("API_ALLOWED_IPS", "")
+
     # Security Headers
     API_CSP_HEADER: str = os.getenv("API_CSP_HEADER", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
     

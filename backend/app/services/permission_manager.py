@@ -139,28 +139,36 @@ class ModulePermissionRegistry:
             "super_admin": [
                 "platform:*",
                 "modules:*",
-                "llm:*"
+                "llm:*",
+                "plugins:*"
             ],
             "admin": [
                 "platform:*",
                 "modules:*",
-                "llm:*"
+                "llm:*",
+                "plugins:*"
             ],
             "developer": [
                 "platform:api-keys:*",
                 "platform:budgets:read",
+                "platform:plugins:view",
+                "platform:plugins:use",
+                "platform:plugins:configure",
                 "llm:completions:execute",
                 "llm:embeddings:execute",
                 "modules:*:read",
                 "modules:*:execute"
             ],
             "user": [
+                "platform:plugins:view",
+                "platform:plugins:use",
                 "llm:completions:execute",
                 "llm:embeddings:execute",
                 "modules:*:read"
             ],
             "readonly": [
                 "platform:*:read",
+                "platform:plugins:view",
                 "modules:*:read"
             ]
         }
@@ -183,42 +191,42 @@ class ModulePermissionRegistry:
             Permission("users", "update", "Update users"),
             Permission("users", "delete", "Delete users"),
             Permission("users", "manage", "Full user management"),
-            
+
             Permission("api-keys", "create", "Create API keys"),
             Permission("api-keys", "read", "View API keys"),
             Permission("api-keys", "update", "Update API keys"),
             Permission("api-keys", "delete", "Delete API keys"),
             Permission("api-keys", "manage", "Full API key management"),
-            
+
             Permission("budgets", "create", "Create budgets"),
             Permission("budgets", "read", "View budgets"),
             Permission("budgets", "update", "Update budgets"),
             Permission("budgets", "delete", "Delete budgets"),
             Permission("budgets", "manage", "Full budget management"),
-            
+
             Permission("audit", "read", "View audit logs"),
             Permission("audit", "export", "Export audit logs"),
-            
+
             Permission("settings", "read", "View settings"),
             Permission("settings", "update", "Update settings"),
             Permission("settings", "manage", "Full settings management"),
-            
+
             Permission("health", "read", "View health status"),
             Permission("metrics", "read", "View metrics"),
-            
+
             Permission("permissions", "read", "View permissions"),
             Permission("permissions", "manage", "Manage permissions"),
-            
+
             Permission("roles", "create", "Create roles"),
             Permission("roles", "read", "View roles"),
             Permission("roles", "update", "Update roles"),
             Permission("roles", "delete", "Delete roles"),
         ]
-        
+
         for perm in platform_permissions:
             perm_string = f"platform:{perm.resource}:{perm.action}"
             self.tree.add_permission(perm_string, perm)
-        
+
         # Register LLM permissions
         llm_permissions = [
             Permission("completions", "execute", "Execute chat completions"),
@@ -226,12 +234,31 @@ class ModulePermissionRegistry:
             Permission("models", "list", "List available models"),
             Permission("usage", "view", "View usage statistics"),
         ]
-        
+
         for perm in llm_permissions:
             perm_string = f"llm:{perm.resource}:{perm.action}"
             self.tree.add_permission(perm_string, perm)
-        
-        logger.info("Registered platform and LLM permissions")
+
+        # Register plugin permissions
+        plugin_permissions = [
+            Permission("plugins", "install", "Install plugins"),
+            Permission("plugins", "uninstall", "Uninstall plugins"),
+            Permission("plugins", "enable", "Enable plugins"),
+            Permission("plugins", "disable", "Disable plugins"),
+            Permission("plugins", "configure", "Configure plugins"),
+            Permission("plugins", "view", "View plugins"),
+            Permission("plugins", "use", "Use plugin functionality"),
+            Permission("plugins", "manage", "Full plugin management"),
+            Permission("plugins", "load", "Load plugins into runtime"),
+            Permission("plugins", "unload", "Unload plugins from runtime"),
+            Permission("plugins", "update", "Update plugins"),
+        ]
+
+        for perm in plugin_permissions:
+            perm_string = f"platform:{perm.resource}:{perm.action}"
+            self.tree.add_permission(perm_string, perm)
+
+        logger.info("Registered platform, LLM, and plugin permissions")
     
     def check_permission(self, user_permissions: List[str], required: str, 
                         context: Dict[str, Any] = None) -> bool:
@@ -379,8 +406,33 @@ class ModulePermissionRegistry:
                     current_path = f"{path}:{key}" if path else key
                     tree[key] = build_tree(value, current_path)
             return tree
-        
+
         return build_tree(self.tree.root)
+
+    def check_plugin_permission(self, user_permissions: List[str], plugin_id: str,
+                               action: str) -> bool:
+        """
+        Check if user has permission to perform action on a specific plugin
+
+        Args:
+            user_permissions: List of user's permissions
+            plugin_id: ID of the plugin
+            action: Action to perform (install, enable, disable, configure, use, etc.)
+
+        Returns:
+            bool: True if user has permission, False otherwise
+        """
+        # Check general plugin permission
+        general_perm = f"platform:plugins:{action}"
+        if self.check_permission(user_permissions, general_perm):
+            return True
+
+        # Check plugin-specific permission (format: plugins:plugin_id:action)
+        specific_perm = f"plugins:{plugin_id}:{action}"
+        if self.check_permission(user_permissions, specific_perm):
+            return True
+
+        return False
 
 
 def require_permission(user_permissions: List[str], required_permission: str, context: Optional[Dict[str, Any]] = None):
